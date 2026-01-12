@@ -1,8 +1,20 @@
+import os
 import time
 import json
 import requests
+from pycognito import AWSSRP
+import boto3
+
+# ENV VARIABLES
+EMAIL = os.getenv("ELDORADO_EMAIL")
+PASSWORD = os.getenv("ELDORADO_PASSWORD")
+POOL_ID = os.getenv("COGNITO_POOL_ID")
+CLIENT_ID = os.getenv("COGNITO_CLIENT_ID")
+HOSTNAME = os.getenv("ELDORADO_HOSTNAME")
 
 ORDERS_FILE = "orders.json"
+
+cognito = boto3.client("cognito-idp", region_name="us-east-2")
 
 def load_orders():
     try:
@@ -11,29 +23,75 @@ def load_orders():
     except:
         return []
 
-def save_orders(order_ids):
+def save_orders(data):
     with open(ORDERS_FILE, "w") as f:
-        json.dump(order_ids, f)
+        json.dump(data, f)
 
-def check_new_orders():
-    # Will be filled after Eldorado API access
+# STEP 1 — LOGIN & GET ID TOKEN
+def get_id_token():
+    aws = AWSSRP(
+        username=EMAIL,
+        password=PASSWORD,
+        pool_id=POOL_ID,
+        client_id=CLIENT_ID,
+        client=cognito
+    )
+
+    auth_params = aws.get_auth_params()
+    response = cognito.initiate_auth(
+        AuthFlow="USER_SRP_AUTH",
+        AuthParameters=auth_params,
+        ClientId=CLIENT_ID
+    )
+
+    challenge = aws.process_challenge(
+        response["ChallengeParameters"],
+        auth_params
+    )
+
+    final = cognito.respond_to_auth_challenge(
+        ClientId=CLIENT_ID,
+        ChallengeName="PASSWORD_VERIFIER",
+        ChallengeResponses=challenge
+    )
+
+    return final["AuthenticationResult"]["IdToken"]
+
+# STEP 2 — GET MY ORDERS
+def get_my_orders(id_token):
+    headers = {
+        "Accept": "application/json",
+        "Cookie": f"__Host-EldoradoIdToken={id_token}"
+    }
+
+    r = requests.get(
+        f"https://{HOSTNAME}/api/orders/me",
+        headers=headers
+    )
+
+    if r.status_code == 200:
+        return r.json()
     return []
 
-def send_auto_message(order_id):
-    # Will be filled after Eldorado API access
-    print(f"Auto reply sent for order {order_id}")
-
 def main():
-    processed_orders = load_orders()
+    processed = load_orders()
 
     while True:
-        new_orders = check_new_orders()
+        try:
+            id_token = get_id_token()
+            orders = get_my_orders(id_token)
 
-        for order in new_orders:
-            if order not in processed_orders:
-                send_auto_message(order)
-                processed_orders.append(order)
-                save_orders(processed_orders)
+            for order in orders:
+                order_id = order["id"]
+
+                if order_id not in processed:
+                    print(f"🆕 New order detected: {order_id}")
+                    # FUTURE: auto message endpoint here
+                    processed.append(order_id)
+                    save_orders(processed)
+
+        except Exception as e:
+            print("Error:", e)
 
         time.sleep(60)
 
